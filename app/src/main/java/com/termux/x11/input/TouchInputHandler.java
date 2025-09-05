@@ -85,6 +85,10 @@ public class TouchInputHandler {
     private final DexListener mDexListener;
     private final TouchInputHandler mTouchpadHandler;
 
+    // OnePlus Pad 2 Pro Keyboard 触控板组件
+    private OnePlusTouchpadDetector mOnePlusTouchpadDetector;
+    private OnePlusTouchpadListener mOnePlusTouchpadListener;
+
     /** Used to disambiguate a 2-finger gesture as a swipe or a pinch. */
     private final SwipeDetector mSwipePinchDetector;
 
@@ -204,6 +208,12 @@ public class TouchInputHandler {
         mDexListener = new DexListener(activity);
         mTouchpadHandler = isTouchpad ? null : new TouchInputHandler(activity, mRenderData, injector, true);
 
+        // 初始化 OnePlus 触控板组件
+        if (!isTouchpad) { // 只在主 TouchInputHandler 中初始化
+            mOnePlusTouchpadListener = new OnePlusTouchpadListener();
+            mOnePlusTouchpadDetector = new OnePlusTouchpadDetector(activity, mOnePlusTouchpadListener);
+        }
+
         refreshInputDevices();
         ((InputManager) mActivity.getSystemService(Context.INPUT_SERVICE)).registerInputDeviceListener(new InputManager.InputDeviceListener() {
             @Override
@@ -268,6 +278,25 @@ public class TouchInputHandler {
                 && (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_FINGER);
     }
 
+    /**
+     * Check if the device is a keyboard with touchpad functionality that is
+     * incorrectly
+     * identified as a mouse device by the manufacturer.
+     * This handles cases like OnePlus Pad 2 Pro Keyboard where the touchpad is
+     * marked
+     * with SOURCE_MOUSE instead of SOURCE_TOUCHPAD.
+     */
+    boolean isKeyboardTouchpadDevice(MotionEvent event) {
+        InputDevice device = event.getDevice();
+        if (device == null)
+            return false;
+
+        String name = device.getName().toLowerCase();
+
+        // Check for OnePlus Pad keyboard
+        return name.contains("touchpad") || name.contains("keyboard");
+    }
+
     public boolean handleTouchEvent(View view0, View view, MotionEvent event) {
         // Regular touchpads and Dex touchpad (in captured mode) send events as finger too,
         // but they should be handled as touchscreens with trackpad mode.
@@ -297,6 +326,11 @@ public class TouchInputHandler {
         if (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_STYLUS
                 || event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_ERASER)
             return mStylusListener.onTouch(event);
+
+        if (isKeyboardTouchpadDevice(event) && mOnePlusTouchpadDetector != null) {
+            // 使用新的状态机架构处理事件
+            return this.mOnePlusTouchpadDetector.handle(event);
+        }
 
         if (!isDexEvent(event) && (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_MOUSE
                 || (event.getSource() & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE)
@@ -1120,6 +1154,136 @@ public class TouchInputHandler {
             mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, true, false);
             mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, false, false);
             return true;
+        }
+    }
+
+    /**
+     * OnePlus Pad 2 Pro Keyboard 触控板手势监听器
+     * 作为内部类，可以直接访问 TouchInputHandler 的成员变量
+     */
+    private class OnePlusTouchpadListener implements OnePlusTouchpadDetector.OnTouchpadGestureListener {
+
+        private static final String TAG = "OnePlusTouchpadListener";
+
+        // 状态管理
+        private boolean mIsDragging = false;
+
+        @Override
+        public void onMouseMove(float x, float y, boolean isDrag) {
+            // android.util.Log.d(TAG, "Mouse move: x=" + x + ", y=" + y + ", isDrag=" + isDrag);
+
+            // 参考 HardwareMouseListener 的实现方式
+            if (!mActivity.getLorieView().hasPointerCapture()) {
+                // 绝对坐标模式 - 直接使用坐标，让RenderData处理位置设置
+                float scaledX = x * mRenderData.scale.x;
+                float scaledY = y * mRenderData.scale.y;
+
+                if (mRenderData.setCursorPosition(scaledX, scaledY)) {
+                    mInjector.sendCursorMove(scaledX, scaledY, false);
+                }
+            } else {
+                float scaledX = x * mInjector.capturedPointerSpeedFactor * mMetrics.density;
+                float scaledY = y * mInjector.capturedPointerSpeedFactor * mMetrics.density;
+                mInjector.sendCursorMove(scaledX, scaledY, true);
+            }
+
+            mIsDragging = isDrag;
+        }
+
+        @Override
+        public void onMouseClick(OnePlusTouchpadDetector.MouseButton button) {
+            android.util.Log.d(TAG, "Mouse click: " + button);
+
+            int buttonCode = convertMouseButton(button);
+            // 使用正确的 InputEventSender 方法
+            mInjector.sendMouseClick(buttonCode, !mActivity.getLorieView().hasPointerCapture());
+        }
+
+        @Override
+        public void onMousePress(OnePlusTouchpadDetector.MouseButton button) {
+            // android.util.Log.d(TAG, "Mouse press: " + button);
+
+            int buttonCode = convertMouseButton(button);
+            boolean relative = !mActivity.getLorieView().hasPointerCapture();
+            mInjector.sendMouseDown(buttonCode, relative);
+        }
+
+        @Override
+        public void onMouseRelease(OnePlusTouchpadDetector.MouseButton button) {
+            // android.util.Log.d(TAG, "Mouse release: " + button);
+
+            int buttonCode = convertMouseButton(button);
+            boolean relative = !mActivity.getLorieView().hasPointerCapture();
+            mInjector.sendMouseUp(buttonCode, relative);
+            mIsDragging = false;
+        }
+
+        @Override
+        public void onScrollWheel(float distanceX, float distanceY) {
+           // android.util.Log.d(TAG, "Scroll wheel: distanceX=" + distanceX + ", distanceY=" + distanceY);
+
+            // 直接使用 InputEventSender 的滚轮方法
+            mInjector.sendMouseWheelEvent(distanceX, distanceY);
+        }
+
+        @Override
+        public void onScrollWheelWithShift(float distanceX, float distanceY) {
+           // android.util.Log.d(TAG, "Scroll wheel with Shift: distanceX=" + distanceX + ", distanceY=" + distanceY);
+
+            // 发送 Shift+滚轮事件 (水平滚动)
+            mInjector.sendKeyEvent(createKeyEvent(KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.ACTION_DOWN));
+            mInjector.sendMouseWheelEvent(distanceX, distanceY);
+            mInjector.sendKeyEvent(createKeyEvent(KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.ACTION_UP));
+        }
+
+        @Override
+        public void onScrollWheelWithCtrl(float distanceX, float distanceY) {
+            // android.util.Log.d(TAG, "Scroll wheel with Ctrl: distanceX=" + distanceX + ", distanceY=" + distanceY);
+
+            // 发送 Ctrl+滚轮事件 (缩放)
+            mInjector.sendKeyEvent(createKeyEvent(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.ACTION_DOWN));
+            mInjector.sendMouseWheelEvent(distanceX, distanceY * 50);
+            mInjector.sendKeyEvent(createKeyEvent(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.ACTION_UP));
+        }
+
+        // ============ 辅助方法 ============
+
+        /**
+         * 转换鼠标按钮类型到 InputStub 常量
+         */
+        private int convertMouseButton(OnePlusTouchpadDetector.MouseButton button) {
+            switch (button) {
+                case LEFT:
+                    return InputStub.BUTTON_LEFT;
+                case RIGHT:
+                    return InputStub.BUTTON_RIGHT;
+                case MIDDLE:
+                    return InputStub.BUTTON_MIDDLE;
+                default:
+                    return InputStub.BUTTON_LEFT;
+            }
+        }
+
+        /**
+         * 创建键盘事件
+         */
+        private KeyEvent createKeyEvent(int keyCode, int action) {
+            long eventTime = System.currentTimeMillis();
+            return new KeyEvent(eventTime, eventTime, action, keyCode, 0);
+        }
+
+        /**
+         * 获取当前拖拽状态
+         */
+        public boolean isDragging() {
+            return mIsDragging;
+        }
+
+        /**
+         * 重置状态
+         */
+        public void reset() {
+            mIsDragging = false;
         }
     }
 }
